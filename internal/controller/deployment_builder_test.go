@@ -1456,6 +1456,85 @@ func TestBuildContainerResources_MemoryLimit(t *testing.T) {
 		}
 	})
 
+	t.Run("memoryLimit raises the ceiling above the request", func(t *testing.T) {
+		// The point of #1763: reserve steady state, allow a burst. Without
+		// this the workload has to RESERVE its peak to be allowed to reach it.
+		res := build(&inferencev1alpha1.InferenceService{
+			Spec: inferencev1alpha1.InferenceServiceSpec{
+				Resources: &inferencev1alpha1.InferenceResourceRequirements{
+					Memory: "8Gi", MemoryLimit: "64Gi",
+				},
+			},
+		})
+		wantReq, wantLim := resource.MustParse("8Gi"), resource.MustParse("64Gi")
+		if got := res.Requests[corev1.ResourceMemory]; !got.Equal(wantReq) {
+			t.Errorf("Requests[memory] = %s, want %s", got.String(), wantReq.String())
+		}
+		if got := res.Limits[corev1.ResourceMemory]; !got.Equal(wantLim) {
+			t.Errorf("Limits[memory] = %s, want %s", got.String(), wantLim.String())
+		}
+	})
+
+	t.Run("memoryLimit applies over hostMemory too", func(t *testing.T) {
+		res := build(&inferencev1alpha1.InferenceService{
+			Spec: inferencev1alpha1.InferenceServiceSpec{
+				Resources: &inferencev1alpha1.InferenceResourceRequirements{
+					Memory: "8Gi", HostMemory: "48Gi", MemoryLimit: "64Gi",
+				},
+			},
+		})
+		wantReq, wantLim := resource.MustParse("48Gi"), resource.MustParse("64Gi")
+		if got := res.Requests[corev1.ResourceMemory]; !got.Equal(wantReq) {
+			t.Errorf("Requests[memory] = %s, want %s", got.String(), wantReq.String())
+		}
+		if got := res.Limits[corev1.ResourceMemory]; !got.Equal(wantLim) {
+			t.Errorf("Limits[memory] = %s, want %s", got.String(), wantLim.String())
+		}
+	})
+
+	t.Run("memoryLimit below the request is ignored", func(t *testing.T) {
+		// The kubelet refuses to admit a pod whose limit is under its request,
+		// so honouring it would turn a typo into an unschedulable workload.
+		res := build(&inferencev1alpha1.InferenceService{
+			Spec: inferencev1alpha1.InferenceServiceSpec{
+				Resources: &inferencev1alpha1.InferenceResourceRequirements{
+					Memory: "8Gi", MemoryLimit: "4Gi",
+				},
+			},
+		})
+		want := resource.MustParse("8Gi")
+		if got := res.Limits[corev1.ResourceMemory]; !got.Equal(want) {
+			t.Errorf("Limits[memory] = %s, want %s (limit below request ignored)", got.String(), want.String())
+		}
+	})
+
+	t.Run("malformed memoryLimit falls back to the request", func(t *testing.T) {
+		res := build(&inferencev1alpha1.InferenceService{
+			Spec: inferencev1alpha1.InferenceServiceSpec{
+				Resources: &inferencev1alpha1.InferenceResourceRequirements{
+					Memory: "8Gi", MemoryLimit: "not-a-quantity",
+				},
+			},
+		})
+		want := resource.MustParse("8Gi")
+		if got := res.Limits[corev1.ResourceMemory]; !got.Equal(want) {
+			t.Errorf("Limits[memory] = %s, want %s", got.String(), want.String())
+		}
+	})
+
+	t.Run("memoryLimit alone sets nothing", func(t *testing.T) {
+		// No request means no memory keys at all; a bare ceiling would make the
+		// pod BestEffort with a limit, which is not what anyone asked for.
+		res := build(&inferencev1alpha1.InferenceService{
+			Spec: inferencev1alpha1.InferenceServiceSpec{
+				Resources: &inferencev1alpha1.InferenceResourceRequirements{MemoryLimit: "64Gi"},
+			},
+		})
+		if v, ok := res.Limits[corev1.ResourceMemory]; ok {
+			t.Errorf("Limits has memory %s, want none", v.String())
+		}
+	})
+
 	t.Run("neither memory nor hostMemory sets no memory key", func(t *testing.T) {
 		res := build(&inferencev1alpha1.InferenceService{
 			Spec: inferencev1alpha1.InferenceServiceSpec{

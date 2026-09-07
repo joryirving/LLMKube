@@ -736,7 +736,23 @@ func buildContainerResources(isvc *inferencev1alpha1.InferenceService, model *in
 		}
 		if memoryQ != nil {
 			res.Requests[corev1.ResourceMemory] = *memoryQ
-			res.Limits[corev1.ResourceMemory] = *memoryQ
+			// memoryLimit, when given, decouples the ceiling from the
+			// reservation so a workload can burst above what it permanently
+			// reserves (#1763). Unset keeps limit == request, so the #1724
+			// protection above still applies by default.
+			limitQ := memoryQ
+			if isvc.Spec.Resources.MemoryLimit != "" {
+				if q, err := resource.ParseQuantity(isvc.Spec.Resources.MemoryLimit); err == nil {
+					// A limit below the request is not a narrower ceiling, it is
+					// a pod the kubelet refuses to admit. Ignoring it leaves the
+					// workload running with the previous behaviour rather than
+					// failing to schedule on a typo.
+					if q.Cmp(*memoryQ) >= 0 {
+						limitQ = &q
+					}
+				}
+			}
+			res.Limits[corev1.ResourceMemory] = *limitQ
 		}
 		// Request AND limit. The request is what the scheduler reserves, so it
 		// stops placing further pods on a node this download is about to fill.
