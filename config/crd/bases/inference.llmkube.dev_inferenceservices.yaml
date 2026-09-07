@@ -4631,12 +4631,38 @@ spec:
                       HostMemory specifies the system RAM required for hybrid GPU/CPU offloading (e.g., "64Gi").
                       Used when MoE expert weights or KV cache are offloaded to CPU via moeCPUOffload or noKvOffload.
                       Translated to pod resources.requests.memory, taking precedence over Memory when set.
+                      Sets limits.memory too unless MemoryLimit is given.
                       Without this, the K8s scheduler has no visibility into the pod's actual RAM consumption,
                       which can lead to OOM kills after model load.
                     pattern: ^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$
                     type: string
                   memory:
-                    description: Memory requests (e.g., "4Gi")
+                    description: |-
+                      Memory is the pod's memory RESERVATION (e.g., "4Gi"), translated to
+                      requests.memory. It also sets limits.memory unless MemoryLimit is given,
+                      so by default request and limit are the same quantity and the container
+                      is Guaranteed for memory.
+                    pattern: ^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$
+                    type: string
+                  memoryLimit:
+                    description: |-
+                      MemoryLimit is the pod's memory CEILING (e.g., "64Gi"), translated to
+                      limits.memory. Set it to let a workload burst above its reservation.
+
+                      Without it, limits.memory equals the request, so a workload has to
+                      RESERVE its peak in order to be allowed to reach it. A server whose
+                      resident set idles low and grows into a large cache would have to reserve
+                      the peak permanently, taking that memory from the scheduler for the whole
+                      life of the pod even though it is free almost all the time (#1763).
+
+                      Leaving this unset preserves the equal request-and-limit behaviour, so
+                      the protection added in #1724 -- an unbounded container crossing
+                      MemoryPressure and taking the node NotReady instead of being OOM-killed
+                      -- still holds by default. This only widens the ceiling when a value is
+                      given, and a limit below the effective request is ignored rather than
+                      applied, since the kubelet rejects such a pod outright.
+
+                      Applies to whichever of Memory/HostMemory drives the request.
                     pattern: ^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$
                     type: string
                 type: object
