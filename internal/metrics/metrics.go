@@ -271,6 +271,17 @@ var (
 		[]string{"router", "pool", "member"},
 	)
 
+	// ModelPoolBusySkipsTotal counts cross-model requests that skipped a pooled
+	// backend under poolActivation=IfIdle because the incumbent was busy, and
+	// fell through to the next backend instead of being held.
+	ModelPoolBusySkipsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llmkube_modelpool_busy_skips_total",
+			Help: "Pooled backends skipped under IfIdle activation because the resident member was busy.",
+		},
+		[]string{"router", "pool", "member"},
+	)
+
 	// ModelPoolHeldRequests reports the number of requests currently held open
 	// per pool member, waiting for activation.
 	ModelPoolHeldRequests = prometheus.NewGaugeVec(
@@ -377,6 +388,7 @@ var AllCollectors = []prometheus.Collector{
 	ModelPoolSwapDuration,
 	ModelPoolHoldDuration,
 	ModelPoolCoalescedTotal,
+	ModelPoolBusySkipsTotal,
 	ModelPoolHeldRequests,
 	ForemanTaskCompletedTotal,
 	ForemanTaskDurationSeconds,

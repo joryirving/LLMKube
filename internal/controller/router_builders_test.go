@@ -630,6 +630,34 @@ func TestCompileRouterConfigCopiesRuleTimeout(t *testing.T) {
 	}
 }
 
+// TestCompileRouterConfigCopiesRulePoolActivation pins that
+// ModelRouter.spec.rules[].route.poolActivation reaches the wire-shape rule;
+// without it every rule silently behaves as Wait.
+func TestCompileRouterConfigCopiesRulePoolActivation(t *testing.T) {
+	mr := canonicalModelRouter()
+	mr.Spec.Rules[0].Route.PoolActivation = "IfIdle"
+
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen3-coder", Namespace: testBuilderNs},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-key", Namespace: testBuilderNs},
+		Data:       map[string][]byte{"ANTHROPIC_API_KEY": []byte("test")},
+	}
+	r := newRouterReconcilerForTest(t, mr, isvc, secret)
+	compiled, err := r.compileRouterConfig(context.Background(), mr)
+	if err != nil {
+		t.Fatalf("compileRouterConfig: %v", err)
+	}
+	var cfg router.Config
+	if err := json.Unmarshal(compiled.JSON, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Rules[0].Route.PoolActivation != router.PoolActivationIfIdle {
+		t.Errorf("rule poolActivation = %q, want %q", cfg.Rules[0].Route.PoolActivation, router.PoolActivationIfIdle)
+	}
+}
+
 // TestCompileRouterConfigCopiesBackendTimeout pins the equivalent for
 // per-backend timeouts.
 func TestCompileRouterConfigCopiesBackendTimeout(t *testing.T) {

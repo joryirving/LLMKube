@@ -361,7 +361,7 @@ func (p *Proxy) dispatchWithFallback(
 		if b.Pool != nil && p.activator != nil {
 			holdCtx, holdCancel := context.WithTimeout(ctx,
 				resolveSwapBudget(b.Pool, p.disp.ResponseHeaderTimeout()))
-			rel, aerr := p.activator.Acquire(holdCtx, b.Pool)
+			rel, aerr := p.activator.AcquireWithMode(holdCtx, b.Pool, dec.PoolActivation)
 			holdCancel()
 			if aerr != nil {
 				lastErr = aerr

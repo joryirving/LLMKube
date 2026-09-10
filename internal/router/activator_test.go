@@ -435,3 +435,119 @@ func TestActivatorInvalidateResidentForcesRecheck(t *testing.T) {
 		t.Errorf("gemma-longctx activate count = %d, want 2 (invalidation forced swap)", got)
 	}
 }
+
+// TestActivatorIfIdleSkipsBusyIncumbent pins the IfIdle contract: a cross-model
+// request against a busy incumbent returns ErrIncumbentBusy at once, starts no
+// swap and leaves the incumbent resident. Once the incumbent drains, the same
+// request swaps exactly as it would under Wait.
+func TestActivatorIfIdleSkipsBusyIncumbent(t *testing.T) {
+	fake := newFakeMemberController()
+	a := NewActivator(context.Background(), fake, "r", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	judgeRel, err := a.Acquire(ctx, testPool("judge"))
+	if err != nil {
+		t.Fatalf("Acquire judge: %v", err)
+	}
+
+	start := time.Now()
+	rel, err := a.AcquireWithMode(ctx, testPool("coder"), PoolActivationIfIdle)
+	if !errors.Is(err, ErrIncumbentBusy) {
+		t.Fatalf("IfIdle against busy incumbent: err = %v, want ErrIncumbentBusy", err)
+	}
+	if rel != nil {
+		t.Error("IfIdle returned a release func alongside an error")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("IfIdle held for %v; must return without waiting on the incumbent", elapsed)
+	}
+	if got := fake.activateCount("coder"); got != 0 {
+		t.Errorf("coder activate count = %d, want 0 (no swap while incumbent busy)", got)
+	}
+	a.mu.Lock()
+	resident := a.pools["lab/heavy-slot"].resident
+	swapping := a.pools["lab/heavy-slot"].swapping
+	a.mu.Unlock()
+	if resident != "judge" || swapping {
+		t.Errorf("resident = %q swapping = %v after IfIdle skip; want judge resident, no swap", resident, swapping)
+	}
+
+	// Drain the incumbent: IfIdle now behaves like Wait and flips the slot.
+	judgeRel()
+	rel, err = a.AcquireWithMode(ctx, testPool("coder"), PoolActivationIfIdle)
+	if err != nil {
+		t.Fatalf("IfIdle against idle incumbent: %v", err)
+	}
+	rel()
+	if got := fake.activateCount("coder"); got != 1 {
+		t.Errorf("coder activate count = %d, want 1 after the incumbent went idle", got)
+	}
+}
+
+// TestActivatorIfIdleWaitsOnInFlightSwap guards the one case IfIdle must NOT
+// short-circuit: a swap towards the target is already running. The incumbent is
+// unloading and cannot serve, so the request waits for the swap like Wait does.
+func TestActivatorIfIdleWaitsOnInFlightSwap(t *testing.T) {
+	fake := newFakeMemberController()
+	gate := make(chan struct{})
+	fake.activateGate = gate
+	a := NewActivator(context.Background(), fake, "r", nil)
+
+	// Cold pool: the first Wait request starts a swap that blocks on the gate.
+	waitDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rel, e := a.Acquire(ctx, testPool("coder"))
+		if rel != nil {
+			rel()
+		}
+		waitDone <- e
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		a.mu.Lock()
+		pr, ok := a.pools["lab/heavy-slot"]
+		swapping := ok && pr.swapping
+		a.mu.Unlock()
+		if swapping {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("swap never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	ifIdleDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rel, e := a.AcquireWithMode(ctx, testPool("coder"), PoolActivationIfIdle)
+		if rel != nil {
+			rel()
+		}
+		ifIdleDone <- e
+	}()
+	select {
+	case e := <-ifIdleDone:
+		t.Fatalf("IfIdle returned %v during an in-flight swap; must wait for it", e)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(gate)
+	for _, ch := range []chan error{waitDone, ifIdleDone} {
+		select {
+		case e := <-ch:
+			if e != nil {
+				t.Fatalf("Acquire after swap completed: %v", e)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("request did not complete after the swap finished")
+		}
+	}
+	if got := fake.activateCount("coder"); got != 1 {
+		t.Errorf("coder activate count = %d, want 1 (one swap shared by both requests)", got)
+	}
+}
