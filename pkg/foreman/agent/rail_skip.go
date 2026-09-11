@@ -20,7 +20,7 @@ import "github.com/defilantech/llmkube/pkg/foreman/agent/reviewer"
 // this verdict?" and answering it should not require knowing every rail's name.
 const railsSkippedKey = "railsSkipped"
 
-// Rail names. Used in railsSkipped entries and, for the two rails that can
+// Rail names. Used in railsSkipped entries and, for the rails that can
 // rewrite a verdict, in the verdictDemotedBy marker those rails stamp. The
 // demoting rails take their names from pkg/foreman/agent/reviewer so the
 // controller, which reads verdictDemotedBy back out of the result envelope
@@ -36,6 +36,13 @@ const (
 	// could not be fetched at all; it never rewrites the verdict. Demotion is
 	// a later flip once the fleet shows the runs fit the turn budget.
 	railExecution = "review-execution"
+	// railUnverifiedSummary names the unverified-summary rail (#1454). It
+	// rewrites a GO to NO-GO when the reviewer's own terminal summary states
+	// in plain language that verification could not be performed. Like the
+	// issueAsk rail's demotion, this is a statement about verification
+	// confidence, not about the change: re-running the coder cannot make an
+	// unverifiable environment verifiable.
+	railUnverifiedSummary = "unverified-summary"
 )
 
 // Reasons a rail could not run.
