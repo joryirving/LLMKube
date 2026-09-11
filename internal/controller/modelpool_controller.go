@@ -129,6 +129,12 @@ func (r *ModelPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	owner := resolveSlotOwner(pool, members)
 
+	// Capture the status baseline before applyReclaimOwner mutates
+	// status.ResidentIdleSince. updateStatus patches with MergeFrom against this
+	// baseline; taken after the mutation it would diff the idle clock away, so
+	// the clock would never persist and the reclaim would never fire.
+	statusBefore := pool.DeepCopy()
+
 	// Reclaim policy: once the resident non-default member has been idle for
 	// spec.reclaimAfter, return the slot to spec.default. This overrides the
 	// desired owner and then rides the ordinary drain-and-swap machinery below
@@ -224,7 +230,7 @@ func (r *ModelPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if reclaimRequeue > 0 && (result.RequeueAfter == 0 || reclaimRequeue < result.RequeueAfter) {
 		result.RequeueAfter = reclaimRequeue
 	}
-	if err := r.updateStatus(ctx, pool, members, owner, swapping, deferReason); err != nil {
+	if err := r.updateStatus(ctx, pool, statusBefore, members, owner, swapping, deferReason); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -567,9 +573,12 @@ func (r *ModelPoolReconciler) markMetalUnsupported(ctx context.Context, pool *in
 	return ctrl.Result{}, nil
 }
 
-func (r *ModelPoolReconciler) updateStatus(ctx context.Context, pool *inferencev1alpha1.ModelPool, members map[string]*inferencev1alpha1.InferenceService, owner string, swapping bool, deferReason string) error {
-	before := pool.DeepCopy()
-
+// updateStatus patches the pool's status with MergeFrom(before). The caller
+// must capture before BEFORE applyReclaimOwner runs: applyReclaimOwner mutates
+// status.ResidentIdleSince, and a baseline taken after that mutation diffs the
+// idle clock out of the patch, so it never persists and the reclaim never fires
+// (the clock resets every reconcile). See the Reconcile call site.
+func (r *ModelPoolReconciler) updateStatus(ctx context.Context, pool, before *inferencev1alpha1.ModelPool, members map[string]*inferencev1alpha1.InferenceService, owner string, swapping bool, deferReason string) error {
 	memberStatuses := make([]inferencev1alpha1.ModelPoolMemberStatus, 0, len(pool.Spec.Members))
 	for _, m := range pool.Spec.Members {
 		name := m.InferenceServiceRef.Name

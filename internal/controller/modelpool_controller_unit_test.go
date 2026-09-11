@@ -294,3 +294,41 @@ func TestApplyReclaimOwner(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyReclaimOwnerRejectsUnsettledPool covers the branches that reset the
+// idle clock and never reclaim because the pool is not settled on a reclaimable
+// non-default resident.
+func TestApplyReclaimOwnerRejectsUnsettledPool(t *testing.T) {
+	longAgo := metav1.NewTime(time.Now().Add(-time.Hour))
+
+	t.Run("empty spec.default resets and never reclaims", func(t *testing.T) {
+		pool, members := reclaimPool("coder", &longAgo, time.Minute, "coder", "glimmer")
+		pool.Spec.Default = ""
+		r := &ModelPoolReconciler{IdleCheck: func(context.Context, *inferencev1alpha1.InferenceService) (bool, error) { return true, nil }}
+		owner, requeue := r.applyReclaimOwner(context.Background(), pool, members, "coder")
+		if owner != "coder" || requeue != 0 || pool.Status.ResidentIdleSince != nil {
+			t.Fatalf("empty-default: owner=%q requeue=%v idleSince=%v", owner, requeue, pool.Status.ResidentIdleSince)
+		}
+	})
+
+	t.Run("resident not Ready resets and never reclaims", func(t *testing.T) {
+		pool, members := reclaimPool("coder", &longAgo, time.Minute, "coder", "glimmer")
+		members["coder"].Status.Phase = "" // anything but PhaseReady is not-Ready
+		r := &ModelPoolReconciler{IdleCheck: func(context.Context, *inferencev1alpha1.InferenceService) (bool, error) { return true, nil }}
+		owner, requeue := r.applyReclaimOwner(context.Background(), pool, members, "coder")
+		if owner != "coder" || requeue != 0 || pool.Status.ResidentIdleSince != nil {
+			t.Fatalf("resident-not-ready: owner=%q requeue=%v idleSince=%v", owner, requeue, pool.Status.ResidentIdleSince)
+		}
+	})
+
+	t.Run("default absent from members resets and never reclaims", func(t *testing.T) {
+		// spec.default ("glimmer") is not among the resolved members, so there is
+		// nothing to reclaim to.
+		pool, members := reclaimPool("coder", &longAgo, time.Minute, "coder")
+		r := &ModelPoolReconciler{IdleCheck: func(context.Context, *inferencev1alpha1.InferenceService) (bool, error) { return true, nil }}
+		owner, requeue := r.applyReclaimOwner(context.Background(), pool, members, "coder")
+		if owner != "coder" || requeue != 0 || pool.Status.ResidentIdleSince != nil {
+			t.Fatalf("default-not-member: owner=%q requeue=%v idleSince=%v", owner, requeue, pool.Status.ResidentIdleSince)
+		}
+	})
+}

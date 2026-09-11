@@ -227,9 +227,15 @@ the burst pauses, the next request immediately swaps it back out, and you have
 traded request coalescing for load thrash — two cold loads where sticky would
 have done none. Size `reclaimAfter` to comfortably outlast a typical lull in the
 on-demand traffic, not the gap between two adjacent requests. The idle clock
-resets on every request the resident serves, so a steady drip of on-demand work
-keeps the on-demand model resident; the slot only returns to the default after a
-genuine quiet period.
+resets only when one of the idle polls catches the resident serving. Idleness is
+sampled on a fixed interval (capped at ~30s, because no event fires on a
+busy-to-idle transition), so a request that starts and finishes between two
+polls is never observed and does not reset the clock: a stream of on-demand work
+that keeps the member busy across polls holds the slot, but a sparse trickle of
+short, sub-poll requests can slip between samples and let the slot reclaim during
+a lull. Size the grace to outlast a genuine quiet period, and expect the guard to
+keep the on-demand model resident only while its traffic keeps at least one poll
+busy.
 
 ### Serving on the warm member instead of waiting: `poolActivation: IfIdle`
 
