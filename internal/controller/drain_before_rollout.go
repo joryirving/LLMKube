@@ -49,6 +49,13 @@ const AnnotationDesiredTemplateHash = "llmkube.ai/desired-template-hash"
 
 var errIdleUnsupported = errors.New("runtime does not implement idle detection")
 
+// errNoEndpoints is returned by checkServiceIdle when the Service has
+// EndpointSlices but none of them carries an address: the service is scaled to
+// zero, or every pod is gone. Whether that means "nothing to drain" or "pods
+// exist but are not addressable yet" depends on the pod count, which the
+// caller has, so the caller decides.
+var errNoEndpoints = errors.New("service has no endpoints to probe")
+
 // desiredTemplateHash computes a deterministic hash of the pod template for the
 // purpose of detecting operator-driven changes. It serializes the template to
 // JSON and hashes it. The reconciler stamps this hash on the Deployment and
@@ -202,12 +209,11 @@ func (r *InferenceServiceReconciler) checkServiceIdle(ctx context.Context, isvc 
 	replicaURLs = append(replicaURLs, collectNotReadyReplicaURLs(slices, port)...)
 	if len(replicaURLs) == 0 {
 		// Nothing reachable: no ready and no not-ready addresses at all.
-		// This is the genuine crashloop / scale-to-zero case (#1250), but we
-		// cannot distinguish "unreachable, so nothing to protect" from "unready
-		// but still working" here, so we do NOT silently proceed. Report not
-		// idle (fail-closed) and let the caller defer rather than roll over
-		// in-flight work on an undetermined state.
-		return false, nil
+		// This is the crashloop / scale-to-zero case (#1250). We cannot tell
+		// "scaled to zero, nothing to protect" from "unready but still
+		// working" from the endpoints alone, so hand the decision back to the
+		// caller, which knows the pod count.
+		return false, errNoEndpoints
 	}
 
 	for _, url := range replicaURLs {
@@ -295,6 +301,19 @@ func (r *InferenceServiceReconciler) reconcileRolloutPolicy(
 	totalPods, readyPods := r.countOldPods(ctx, isvc)
 
 	idle, checkErr := r.checkServiceIdle(ctx, isvc, svc)
+	if errors.Is(checkErr, errNoEndpoints) {
+		// A service scaled to zero (a stopped ModelPool member being started,
+		// or a template change that landed while replicas was 0) has no
+		// in-flight work to protect. Treating the empty endpoint list as
+		// "busy" deadlocked the scale-up until idleTimeoutSeconds. When pods
+		// do exist but none is addressable yet, keep the fail-closed path.
+		if totalPods == 0 {
+			idle, checkErr = true, nil
+			log.Info("No pods and no endpoints, nothing to drain; proceeding with rollout")
+		} else {
+			idle, checkErr = false, nil
+		}
+	}
 
 	if checkErr == nil && idle {
 		if existingCond != nil {
