@@ -178,18 +178,64 @@ Four conditions report the pool's health:
 | `SwapDeferred` | a swap is being held off rather than performed |
 | `MetalSupported` | whether the members are Kubernetes GPU-gated or Apple-metal backed |
 
-### Sticky is the only policy, and it means what it says
+### Sticky is the default policy, and it means what it says
 
-`swapPolicy: sticky` (the default and the only value in v1) keeps the incumbent
-until a *different* member is requested. A priority-based reclaim policy is a
-planned follow-up.
+`swapPolicy: sticky` (the default) keeps the incumbent until a *different* member
+is requested.
 
 One consequence surprises operators, so it is worth stating plainly: **editing
-`spec.default` on a warm pool does not move the slot.** `default` names the
+`spec.default` on a warm sticky pool does not move the slot.** `default` names the
 member to warm on a *cold* pool, before anything has picked an owner. Once a
 member is resident, sticky keeps it there and the `default` edit is inert until
 the pool next goes cold. Verified on-cluster: after repointing `default` at the
 other member, the incumbent still owned the slot two minutes later.
+
+### Returning the slot to a background default: `swapPolicy: reclaim`
+
+Sticky never brings the pool back to a preferred model on its own. That is fine
+when both members are peers, but not when one is a *background default* you want
+resident at rest and the other is an *on-demand* model a batch job bursts
+against. With sticky, the first on-demand burst takes the slot and keeps it: the
+on-demand member stays resident and idle, and (with `poolActivation: IfIdle`,
+below) an interactive workload rides that idle on-demand model forever. Nothing
+returns the slot to the default.
+
+`swapPolicy: reclaim` adds that missing half. It behaves like sticky for
+cross-model demand, and additionally returns the slot to `spec.default` once the
+resident *non-default* member has been continuously idle for `spec.reclaimAfter`:
+
+```yaml
+apiVersion: inference.llmkube.dev/v1alpha1
+kind: ModelPool
+spec:
+  swapPolicy: reclaim
+  default: glimmer          # the background model, resident at rest
+  reclaimAfter: 10m         # idle grace before the slot returns to glimmer
+  members:
+    - inferenceServiceRef: { name: glimmer }   # background default
+    - inferenceServiceRef: { name: coder }     # on-demand burst tenant
+```
+
+The reclaim reuses the ordinary drain contract: the idle resident is drained
+like any displaced incumbent, then the default loads. A busy resident is never
+reclaimed. Reclaims are counted in `llmkube_modelpool_reclaims_total`.
+
+**`reclaimAfter` must be longer than the on-demand member's inter-burst gap.**
+This is the one way to misconfigure reclaim. If the grace is shorter than the gap
+between the on-demand model's requests, the pool reclaims the default the moment
+the burst pauses, the next request immediately swaps it back out, and you have
+traded request coalescing for load thrash — two cold loads where sticky would
+have done none. Size `reclaimAfter` to comfortably outlast a typical lull in the
+on-demand traffic, not the gap between two adjacent requests. The idle clock
+resets only when one of the idle polls catches the resident serving. Idleness is
+sampled on a fixed interval (capped at ~30s, because no event fires on a
+busy-to-idle transition), so a request that starts and finishes between two
+polls is never observed and does not reset the clock: a stream of on-demand work
+that keeps the member busy across polls holds the slot, but a sparse trickle of
+short, sub-poll requests can slip between samples and let the slot reclaim during
+a lull. Size the grace to outlast a genuine quiet period, and expect the guard to
+keep the on-demand model resident only while its traffic keeps at least one poll
+busy.
 
 ### Serving on the warm member instead of waiting: `poolActivation: IfIdle`
 
