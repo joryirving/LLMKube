@@ -192,6 +192,20 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"pool_activation_timeout", elapsed)
 			return
 		}
+		// Every backend in an IfIdle rule skipped because its ModelPool incumbent
+		// was busy: no preferred member is warm right now. This is the same
+		// transient, retryable class as the hold-budget timeout above (the
+		// incumbent will drain and a retry will serve), so give it the same 503 +
+		// Retry-After treatment and its own audit reason rather than a generic
+		// 502 that reads as an upstream outage.
+		if errors.Is(err, ErrIncumbentBusy) {
+			w.Header().Set("Retry-After", modelPoolRetryAfterSeconds)
+			writeError(w, http.StatusServiceUnavailable,
+				"model pool incumbent busy; no preferred member is warm, retry")
+			p.audit(features, decision, nil, http.StatusServiceUnavailable,
+				"pool_incumbent_busy", elapsed)
+			return
+		}
 		// Runtime fail-closed: when every backend in a fail-closed
 		// rule's pool is unreachable, return 503 with a clear reason
 		// rather than 502. This is the runtime counterpart to the
@@ -336,15 +350,24 @@ func (p *Proxy) dispatchWithFallback(
 	path string,
 ) (*Backend, *http.Response, error) {
 	var lastErr error
+	// allIncumbentBusy stays true only if every backend that was tried failed
+	// specifically because its ModelPool incumbent was busy under IfIdle (no
+	// swap started). Any other failure (unconfigured, unhealthy, dispatch error,
+	// 5xx) makes it false. When it holds, the aggregate is a transient,
+	// retryable condition (503 + Retry-After) rather than a generic upstream
+	// outage (502).
+	allIncumbentBusy := true
 	tracer := otel.Tracer("model_router.dispatch")
 	for i, name := range dec.Backends {
 		b := p.matcher.BackendByName(name)
 		if b == nil {
 			lastErr = fmt.Errorf("backend %q not configured", name)
+			allIncumbentBusy = false
 			continue
 		}
 		if !p.disp.IsHealthy(name) {
 			lastErr = fmt.Errorf("backend %q marked unhealthy", name)
+			allIncumbentBusy = false
 			continue
 		}
 
@@ -365,6 +388,9 @@ func (p *Proxy) dispatchWithFallback(
 			holdCancel()
 			if aerr != nil {
 				lastErr = aerr
+				if !errors.Is(aerr, ErrIncumbentBusy) {
+					allIncumbentBusy = false
+				}
 				continue
 			}
 			poolRelease = rel
@@ -396,6 +422,7 @@ func (p *Proxy) dispatchWithFallback(
 			span.End()
 			cancel()
 			lastErr = err
+			allIncumbentBusy = false
 			continue
 		}
 		if resp.StatusCode >= 500 {
@@ -408,6 +435,7 @@ func (p *Proxy) dispatchWithFallback(
 			span.End()
 			cancel()
 			lastErr = fmt.Errorf("%s returned %d", name, resp.StatusCode)
+			allIncumbentBusy = false
 			continue
 		}
 		// Successful response: wrap the body so its Close also
@@ -427,6 +455,11 @@ func (p *Proxy) dispatchWithFallback(
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no backends attempted")
+	} else if allIncumbentBusy {
+		// Every backend skipped under IfIdle because its incumbent was busy.
+		// Return the sentinel unwrapped so the handler maps it to 503 +
+		// Retry-After like the sibling hold-budget timeout, not a 502.
+		return nil, nil, ErrIncumbentBusy
 	}
 	return nil, nil, lastErr
 }

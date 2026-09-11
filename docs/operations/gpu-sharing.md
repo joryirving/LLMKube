@@ -228,6 +228,14 @@ member's Service directly, bypassing the router, is invisible to this check
 pool traffic through the router if you rely on `IfIdle`. Skips are counted in
 `llmkube_modelpool_busy_skips_total{router,pool,member}`.
 
+If *every* backend in an `IfIdle` rule skips because no preferred member is warm
+(the slot is held busy by a member outside the rule), the request cannot be
+served right now. The proxy returns `503` with a `Retry-After` header and the
+audit reason `pool_incumbent_busy`, the same retryable signal as a swap that
+outruns `swapBudget`, so a client that retries after the incumbent drains is
+served. It is deliberately not a `502`: nothing is broken upstream, the slot is
+just occupied.
+
 ### swapBudget, and why it is separate from the request timeout
 
 `swapBudget` (default `300s`) bounds how long the router holds a cross-model
