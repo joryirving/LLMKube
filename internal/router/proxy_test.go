@@ -628,6 +628,86 @@ func TestProxyPoolIfIdleFallsBackToResident(t *testing.T) {
 	}
 }
 
+// TestProxyPoolIfIdleAllBusyReturns503 verifies that when every backend in an
+// IfIdle rule skips because the pool incumbent is busy (no preferred member is
+// warm), the proxy returns 503 + Retry-After (the same retryable class as a
+// hold-budget timeout), not a 502 that reads as an upstream outage. A third
+// member, gemma, holds the slot busy; the rule only routes to coder and judge,
+// so both skip.
+func TestProxyPoolIfIdleAllBusyReturns503(t *testing.T) {
+	coderBackend := newFakeBackend(t)
+	judgeBackend := newFakeBackend(t)
+
+	fake := newFakeMemberController()
+	fake.setPhase("gemma", modelReadyPhase)
+	pool := func(member string) *BackendPool {
+		return &BackendPool{
+			Name:       "heavy-slot",
+			Namespace:  "lab",
+			Member:     member,
+			Members:    []string{"coder", "judge", "gemma"},
+			SwapBudget: 5 * time.Second,
+		}
+	}
+	cfg := &Config{
+		Backends: []Backend{
+			{Name: "coder", Tier: "local", Address: coderBackend.URL(), Pool: pool("coder")},
+			{Name: "judge", Tier: "local", Address: judgeBackend.URL(), Pool: pool("judge")},
+		},
+		Rules: []Rule{{
+			Name:  "prefer-coder",
+			Match: RuleMatch{Models: []string{"work"}},
+			Route: RuleRoute{Backends: []string{"coder", "judge"}, PoolActivation: PoolActivationIfIdle},
+		}},
+		DefaultRoute: "coder",
+		Policy:       Policy{Classification: ClassificationPolicy{Mode: "header-only"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	act := NewActivator(context.Background(), fake, "r", slog.Default())
+	// gemma owns the slot with a request in flight for the whole test, so
+	// neither coder nor judge (the rule's backends) can swap in under IfIdle.
+	gemmaRel, err := act.Acquire(context.Background(), pool("gemma"))
+	if err != nil {
+		t.Fatalf("seed busy gemma: %v", err)
+	}
+	defer gemmaRel()
+
+	proxy := NewProxy(cfg, slog.Default(), WithActivator(act))
+	mux := http.NewServeMux()
+	proxy.Mount(mux)
+
+	body, _ := json.Marshal(map[string]any{
+		"model":    "work",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	mux.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (all IfIdle backends busy is retryable, not 502)", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("missing Retry-After header on all-incumbent-busy 503")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("request took %v; IfIdle must skip immediately, not hold", elapsed)
+	}
+	if coderBackend.calls.Load() != 0 || judgeBackend.calls.Load() != 0 {
+		t.Errorf("backend calls coder=%d judge=%d, want 0/0 (nothing warm to serve)",
+			coderBackend.calls.Load(), judgeBackend.calls.Load())
+	}
+	if got := fake.activateCount("coder") + fake.activateCount("judge"); got != 0 {
+		t.Errorf("activate count = %d, want 0 (no swap while gemma is busy)", got)
+	}
+}
+
 // TestProxyRejectsOversizedBody enforces the body-size cap; a request
 // larger than maxRequestBodyBytes is rejected with 400.
 func TestProxyRejectsOversizedBody(t *testing.T) {
