@@ -981,6 +981,89 @@ var _ = Describe("RolloutPolicy drain-before-rollout", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, dep)).To(Succeed())
 			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/ggml-org/llama.cpp:server"))
 		})
+
+		It("should proceed when there is no EndpointSlice at all and no pods", func() {
+			modelName := "model-no-slice"
+			isvcName := "isvc-no-slice"
+			model, isvc, reconciler := setupChangedTemplate(modelName, isvcName)
+			defer func() { _ = k8sClient.Delete(ctx, model) }()
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			// No EndpointSlice is created at all: the sibling of the empty-slice
+			// case, reached when upstream's endpointslice reconciler deletes the
+			// slice after its last endpoint is removed. Point the Service-URL
+			// fallback at a closed port so the probe fails exactly as it does
+			// against a zero-replica Service with nothing behind it.
+			dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			deadURL := dead.URL
+			dead.Close()
+			reconciler.RolloutIdleBaseURL = deadURL
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: isvcName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, dep)).To(Succeed())
+			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/ggml-org/llama.cpp:server-v2"),
+				"a service with no EndpointSlice and no pods must roll out immediately, not defer via the URL fallback")
+
+			final := &inferencev1alpha1.InferenceService{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, final)).To(Succeed())
+			Expect(findRolloutDeferredCondition(final.Status.Conditions)).To(BeNil())
+		})
+
+		It("should still defer when there is no EndpointSlice at all but a pod exists", func() {
+			modelName := "model-no-slice-pod"
+			isvcName := "isvc-no-slice-pod"
+			model, isvc, reconciler := setupChangedTemplate(modelName, isvcName)
+			defer func() { _ = k8sClient.Delete(ctx, model) }()
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			deadURL := dead.URL
+			dead.Close()
+			reconciler.RolloutIdleBaseURL = deadURL
+
+			// A Ready old-generation pod the (now absent) endpoint list has not
+			// caught up with may still hold in-flight work, so the gate must
+			// stay closed even though the Service-URL probe cannot answer.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      isvcName + "-old",
+					Namespace: "default",
+					Labels: map[string]string{
+						"app":                           isvcName,
+						"inference.llmkube.dev/service": isvcName,
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "llama-server", Image: "ghcr.io/ggml-org/llama.cpp:server"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: isvcName, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			deferred := &inferencev1alpha1.InferenceService{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, deferred)).To(Succeed())
+			cond := findRolloutDeferredCondition(deferred.Status.Conditions)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal(ReasonPodsBusy))
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, dep)).To(Succeed())
+			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/ggml-org/llama.cpp:server"))
+		})
+
 	})
 
 	Context("rolloutPolicyEnabled helper", func() {
@@ -1151,7 +1234,7 @@ var _ = Describe("LlamaCppBackend.IdleProbe", func() {
 var _ = Describe("RolloutPolicy envtest integration", func() {
 	ctx := context.Background()
 
-	It("should defer rollout (fail-closed) when the idle check fails", func() {
+	It("should proceed when the idle probe cannot answer and there are no pods (#1793 via the Service-URL fallback)", func() {
 		modelName := "model-fail-closed"
 		isvcName := "isvc-fail-closed"
 
@@ -1217,22 +1300,28 @@ var _ = Describe("RolloutPolicy envtest integration", func() {
 		updated.Spec.Image = "ghcr.io/ggml-org/llama.cpp:server-v2"
 		Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
-		// Second reconcile: template changed, idle check runs against unreachable
-		// cluster-DNS URL (no /slots endpoint in envtest) -> error -> fail-closed.
-		// A failing /slots probe must NOT roll; it must defer until idle or timeout.
+		// Second reconcile: template changed, the idle check runs against the
+		// unreachable cluster-DNS Service URL (no EndpointSlice, no /slots
+		// endpoint in envtest), so the probe cannot answer. With no endpoints
+		// AND no pods there is nothing to drain, so the rollout must proceed
+		// rather than deadlock on IdleCheckFailed until the timeout (#1793 via
+		// the Service-URL fallback). Fail-closed with a pod present is covered by
+		// the scale-from-zero "pod exists" specs, and IdleCheckFailed from an
+		// unreachable published replica by the vLLM replica spec.
 		result2, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: isvcName, Namespace: "default"},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result2.RequeueAfter).To(BeNumerically(">", 0))
+		Expect(result2.RequeueAfter).To(BeZero())
 
-		// Verify RolloutDeferred condition with IdleCheckFailed reason.
-		deferredISVC := &inferencev1alpha1.InferenceService{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, deferredISVC)).To(Succeed())
-		cond := findRolloutDeferredCondition(deferredISVC.Status.Conditions)
-		Expect(cond).NotTo(BeNil())
-		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-		Expect(cond.Reason).To(Equal(ReasonIdleCheckFailed))
+		rolled := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, rolled)).To(Succeed())
+		Expect(rolled.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/ggml-org/llama.cpp:server-v2"),
+			"no endpoints and no pods means nothing to drain; the rollout must not defer on the URL fallback")
+
+		proceeded := &inferencev1alpha1.InferenceService{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: isvcName, Namespace: "default"}, proceeded)).To(Succeed())
+		Expect(findRolloutDeferredCondition(proceeded.Status.Conditions)).To(BeNil())
 	})
 })
 
@@ -2526,7 +2615,8 @@ var _ = Describe("countOldPods", func() {
 			Scheme:             k8sClient.Scheme(),
 			InitContainerImage: "docker.io/curlimages/curl:8.18.0",
 		}
-		total, ready := reconciler.countOldPods(ctx, isvc)
+		total, ready, err := reconciler.countOldPods(ctx, isvc)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(total).To(Equal(int32(0)))
 		Expect(ready).To(Equal(int32(0)))
 	})
@@ -2572,7 +2662,8 @@ var _ = Describe("countOldPods", func() {
 			Scheme:             k8sClient.Scheme(),
 			InitContainerImage: "docker.io/curlimages/curl:8.18.0",
 		}
-		total, ready := reconciler.countOldPods(ctx, isvc)
+		total, ready, err := reconciler.countOldPods(ctx, isvc)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(total).To(Equal(int32(3)))
 		Expect(ready).To(Equal(int32(3)))
 	})
@@ -2618,7 +2709,8 @@ var _ = Describe("countOldPods", func() {
 			Scheme:             k8sClient.Scheme(),
 			InitContainerImage: "docker.io/curlimages/curl:8.18.0",
 		}
-		total, ready := reconciler.countOldPods(ctx, isvc)
+		total, ready, err := reconciler.countOldPods(ctx, isvc)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(total).To(Equal(int32(3)))
 		Expect(ready).To(Equal(int32(0)))
 	})
@@ -2688,7 +2780,8 @@ var _ = Describe("countOldPods", func() {
 			Scheme:             k8sClient.Scheme(),
 			InitContainerImage: "docker.io/curlimages/curl:8.18.0",
 		}
-		total, ready := reconciler.countOldPods(ctx, isvc)
+		total, ready, err := reconciler.countOldPods(ctx, isvc)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(total).To(Equal(int32(3)))
 		Expect(ready).To(Equal(int32(1)))
 	})

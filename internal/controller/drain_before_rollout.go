@@ -190,8 +190,24 @@ func (r *InferenceServiceReconciler) checkServiceIdle(ctx context.Context, isvc 
 	if len(slices.Items) == 0 {
 		idle, err := probe(ctx, svcURL)
 		if err != nil {
-			log.Info("Failed to check server idle status via Service URL", "error", err)
-			return false, err
+			if errors.Is(err, errIdleUnsupported) {
+				// The runtime cannot be idle-checked at all (e.g. a generic
+				// runtime with no idle annotation). Preserve that signal so the
+				// caller defers with IdleCheckUnsupported rather than treating it
+				// as an empty endpoint list and rolling over live work.
+				return false, err
+			}
+			// No EndpointSlice exists and the Service URL probe could not reach a
+			// backend. Upstream's endpointslice reconciler deletes a slice once
+			// its last endpoint is removed, so a scaled-to-zero Service has none
+			// and its URL has nothing behind it. Returning the raw error defers
+			// with IdleCheckFailed until idleTimeoutSeconds — the #1793 deadlock,
+			// reached through the fallback rather than the empty-slice path. Hand
+			// the decision to the caller's pod-count resolution, symmetric with
+			// the empty-endpoints path below: it proceeds only when no pods
+			// exist either, and stays deferred (fail-closed) when one does.
+			log.Info("No EndpointSlices and the Service URL probe could not reach a backend; deferring to pod-count resolution", "error", err)
+			return false, errNoEndpoints
 		}
 		if !idle {
 			log.Info("Backend is busy (Service URL fallback), deferring rollout")
@@ -236,14 +252,19 @@ func (r *InferenceServiceReconciler) checkServiceIdle(ctx context.Context, isvc 
 // total count and the number of Ready pods. A pod is considered Ready when its
 // PodReady condition is True. This is used by reconcileRolloutPolicy to decide
 // whether there is in-flight work to protect before deferring a rollout.
-func (r *InferenceServiceReconciler) countOldPods(ctx context.Context, isvc *inferencev1alpha1.InferenceService) (total, ready int32) {
+//
+// A List error is returned rather than swallowed as a zero count. The caller
+// promotes a zero count to a rollout gate (proceed when nothing is left to
+// drain), so a transient List failure reported as zero would roll a pod that
+// may still hold work. The caller must fail closed on the error.
+func (r *InferenceServiceReconciler) countOldPods(ctx context.Context, isvc *inferencev1alpha1.InferenceService) (total, ready int32, err error) {
 	podList := &corev1.PodList{}
 	labels := client.MatchingLabels{
 		"app":                           isvc.Name,
 		"inference.llmkube.dev/service": isvc.Name,
 	}
-	if err := r.List(ctx, podList, client.InNamespace(isvc.Namespace), labels); err != nil {
-		return 0, 0
+	if listErr := r.List(ctx, podList, client.InNamespace(isvc.Namespace), labels); listErr != nil {
+		return 0, 0, listErr
 	}
 	for i := range podList.Items {
 		pod := &podList.Items[i]
@@ -255,7 +276,7 @@ func (r *InferenceServiceReconciler) countOldPods(ctx context.Context, isvc *inf
 			}
 		}
 	}
-	return total, ready
+	return total, ready, nil
 }
 
 // reconcileRolloutPolicy checks whether the rollout should be deferred based on
@@ -298,7 +319,7 @@ func (r *InferenceServiceReconciler) reconcileRolloutPolicy(
 	// generations already accepted keep running. checkServiceIdle probes both
 	// ready and not-ready endpoints, so we always consult it rather than
 	// proceeding on the basis of readiness alone.
-	totalPods, readyPods := r.countOldPods(ctx, isvc)
+	totalPods, readyPods, countErr := r.countOldPods(ctx, isvc)
 
 	idle, checkErr := r.checkServiceIdle(ctx, isvc, svc)
 	if errors.Is(checkErr, errNoEndpoints) {
@@ -307,10 +328,18 @@ func (r *InferenceServiceReconciler) reconcileRolloutPolicy(
 		// in-flight work to protect. Treating the empty endpoint list as
 		// "busy" deadlocked the scale-up until idleTimeoutSeconds. When pods
 		// do exist but none is addressable yet, keep the fail-closed path.
-		if totalPods == 0 {
+		switch {
+		case countErr != nil:
+			// The pod list failed, so we cannot prove nothing is left to
+			// drain. This gate promotes a zero count to "proceed", so a
+			// transient List error must defer rather than roll a pod that may
+			// still hold work.
+			idle, checkErr = false, nil
+			log.Info("No endpoints and the pod list failed; deferring rollout (fail-closed)", "error", countErr)
+		case totalPods == 0:
 			idle, checkErr = true, nil
 			log.Info("No pods and no endpoints, nothing to drain; proceeding with rollout")
-		} else {
+		default:
 			idle, checkErr = false, nil
 		}
 	}
