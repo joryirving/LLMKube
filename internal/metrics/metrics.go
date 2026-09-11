@@ -239,6 +239,17 @@ var (
 		[]string{"router", "pool", "from", "to"},
 	)
 
+	// ModelPoolReclaimsTotal counts slot reclaims: the controller returned the
+	// shared slot to spec.default after the resident non-default member went
+	// idle for the pool's reclaimAfter under the "reclaim" swap policy.
+	ModelPoolReclaimsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llmkube_modelpool_reclaims_total",
+			Help: "Total number of ModelPool slot reclaims to spec.default after the resident member went idle.",
+		},
+		[]string{"namespace", "pool", "from", "to"},
+	)
+
 	// ModelPoolSwapDuration measures how long a swap takes from the router's
 	// commit (incumbent drain start) to the target reporting Ready.
 	ModelPoolSwapDuration = prometheus.NewHistogramVec(
@@ -385,6 +396,7 @@ var AllCollectors = []prometheus.Collector{
 	RouterBudgetUtilization,
 	ModelPoolResident,
 	ModelPoolSwapsTotal,
+	ModelPoolReclaimsTotal,
 	ModelPoolSwapDuration,
 	ModelPoolHoldDuration,
 	ModelPoolCoalescedTotal,
