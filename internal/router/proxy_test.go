@@ -552,6 +552,82 @@ func TestProxyPoolSwapBudgetDecoupledFromDispatchTimeout(t *testing.T) {
 	}
 }
 
+// TestProxyPoolIfIdleFallsBackToResident is the end-to-end IfIdle contract: a
+// rule routes [coder, judge] with poolActivation IfIdle while judge is resident
+// and busy. The request must be served by judge immediately, with coder never
+// activated and nothing held. Under the default Wait mode the same request would
+// sit in the hold until judge drained.
+func TestProxyPoolIfIdleFallsBackToResident(t *testing.T) {
+	coderBackend := newFakeBackend(t)
+	judgeBackend := newFakeBackend(t)
+
+	fake := newFakeMemberController()
+	fake.setPhase("judge", modelReadyPhase)
+	pool := func(member string) *BackendPool {
+		return &BackendPool{
+			Name:       "heavy-slot",
+			Namespace:  "lab",
+			Member:     member,
+			Members:    []string{"coder", "judge"},
+			SwapBudget: 5 * time.Second,
+		}
+	}
+	cfg := &Config{
+		Backends: []Backend{
+			{Name: "coder", Tier: "local", Address: coderBackend.URL(), Pool: pool("coder")},
+			{Name: "judge", Tier: "local", Address: judgeBackend.URL(), Pool: pool("judge")},
+		},
+		Rules: []Rule{{
+			Name:  "prefer-coder",
+			Match: RuleMatch{Models: []string{"work"}},
+			Route: RuleRoute{Backends: []string{"coder", "judge"}, PoolActivation: PoolActivationIfIdle},
+		}},
+		DefaultRoute: "judge",
+		Policy:       Policy{Classification: ClassificationPolicy{Mode: "header-only"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	act := NewActivator(context.Background(), fake, "r", slog.Default())
+	// judge is resident with one request in flight for the whole test.
+	judgeRel, err := act.Acquire(context.Background(), pool("judge"))
+	if err != nil {
+		t.Fatalf("seed busy judge: %v", err)
+	}
+	defer judgeRel()
+
+	proxy := NewProxy(cfg, slog.Default(), WithActivator(act))
+	mux := http.NewServeMux()
+	proxy.Mount(mux)
+
+	body, _ := json.Marshal(map[string]any{
+		"model":    "work",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (busy incumbent must serve the request)", rec.Code)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("request took %v; IfIdle must not hold behind the busy incumbent", elapsed)
+	}
+	if judgeBackend.calls.Load() != 1 {
+		t.Errorf("judge calls = %d, want 1", judgeBackend.calls.Load())
+	}
+	if coderBackend.calls.Load() != 0 {
+		t.Errorf("coder calls = %d, want 0", coderBackend.calls.Load())
+	}
+	if got := fake.activateCount("coder"); got != 0 {
+		t.Errorf("coder activate count = %d, want 0 (no swap while judge is busy)", got)
+	}
+}
+
 // TestProxyRejectsOversizedBody enforces the body-size cap; a request
 // larger than maxRequestBodyBytes is rejected with 400.
 func TestProxyRejectsOversizedBody(t *testing.T) {

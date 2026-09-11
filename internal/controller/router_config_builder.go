@@ -356,8 +356,9 @@ func translateRule(in *inferencev1alpha1.RouterRule) router.Rule {
 		Name:       in.Name,
 		FailClosed: in.FailClosed,
 		Route: router.RuleRoute{
-			Backends: append([]string(nil), in.Route.Backends...),
-			Strategy: in.Route.Strategy,
+			Backends:       append([]string(nil), in.Route.Backends...),
+			Strategy:       in.Route.Strategy,
+			PoolActivation: in.Route.PoolActivation,
 		},
 	}
 	if in.Match != nil {

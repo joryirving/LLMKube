@@ -202,7 +202,20 @@ type RuleRoute struct {
 	// Only primary-fallback is implemented in the MVP; the other two land
 	// in #432.
 	Strategy string `json:"strategy,omitempty"`
+
+	// PoolActivation is "Wait" (default) or "IfIdle". Under IfIdle a pooled
+	// backend whose incumbent is busy is skipped rather than held, so the
+	// dispatch loop falls through to the next backend in Backends. Compiled
+	// from ModelRouter.spec.rules[].route.poolActivation.
+	PoolActivation string `json:"poolActivation,omitempty"`
 }
+
+// Pool activation modes for RuleRoute.PoolActivation. See the CRD field
+// documentation for the semantics of each.
+const (
+	PoolActivationWait   = "Wait"
+	PoolActivationIfIdle = "IfIdle"
+)
 
 // Policy holds cross-cutting controls.
 type Policy struct {
@@ -292,6 +305,12 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("rules[%d] %s: route.backends[%d] %q does not name an existing backend",
 					i, r.Name, j, name)
 			}
+		}
+		switch r.Route.PoolActivation {
+		case "", PoolActivationWait, PoolActivationIfIdle:
+		default:
+			return fmt.Errorf("rules[%d] %s: route.poolActivation %q must be %q or %q",
+				i, r.Name, r.Route.PoolActivation, PoolActivationWait, PoolActivationIfIdle)
 		}
 	}
 	return nil

@@ -26,6 +26,12 @@ import (
 // unavailable" signal), never a 429.
 var ErrHoldBudgetExceeded = errors.New("model pool activation hold budget exceeded")
 
+// ErrIncumbentBusy is returned by Activator.AcquireWithMode under
+// PoolActivationIfIdle when the target member is not resident and the
+// resident member has in-flight requests. No swap is started and nothing is
+// held; the caller falls through to its next backend.
+var ErrIncumbentBusy = errors.New("model pool incumbent busy; swap not started")
+
 // MemberController is the slice of Kubernetes operations the Activator needs to
 // drive a ModelPool swap. It is an interface so the swap policy is unit-testable
 // without a live cluster: tests inject a fake, production injects the
@@ -168,6 +174,17 @@ func (pr *poolRuntime) notify() {
 // (ErrHoldBudgetExceeded or a context error) means the caller should not
 // dispatch; an in-progress load is never aborted by a caller giving up.
 func (a *Activator) Acquire(ctx context.Context, p *BackendPool) (func(), error) {
+	return a.AcquireWithMode(ctx, p, PoolActivationWait)
+}
+
+// AcquireWithMode is Acquire with an explicit pool activation mode. Under
+// PoolActivationWait it behaves exactly like Acquire. Under
+// PoolActivationIfIdle a cross-model request whose incumbent is busy returns
+// ErrIncumbentBusy at once instead of being held: a swap is only ever started
+// when the incumbent is idle, so the request can be served on whichever member
+// is warm. A swap already in flight is still waited on in both modes, because
+// the incumbent is unloading and cannot serve the request either way.
+func (a *Activator) AcquireWithMode(ctx context.Context, p *BackendPool, mode string) (func(), error) {
 	member := p.Member
 
 	a.mu.Lock()
@@ -250,6 +267,10 @@ func (a *Activator) Acquire(ctx context.Context, p *BackendPool) (func(), error)
 			incumbent := pr.resident
 			if incumbent == "" || pr.inflight[incumbent] == 0 {
 				a.startSwap(pr, incumbent, member, holdStart)
+			} else if mode == PoolActivationIfIdle {
+				prommetrics.ModelPoolBusySkipsTotal.WithLabelValues(a.router, pr.pool, member).Inc()
+				a.mu.Unlock()
+				return nil, ErrIncumbentBusy
 			}
 		}
 

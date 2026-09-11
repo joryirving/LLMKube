@@ -191,6 +191,43 @@ member is resident, sticky keeps it there and the `default` edit is inert until
 the pool next goes cold. Verified on-cluster: after repointing `default` at the
 other member, the incumbent still owned the slot two minutes later.
 
+### Serving on the warm member instead of waiting: `poolActivation: IfIdle`
+
+By default a request for the non-resident member is held until the incumbent
+drains, however long that takes (up to `swapBudget`). That is the right call
+when the caller only accepts that one model. It is the wrong call for a caller
+that *prefers* one member but would rather run on the other than queue behind
+someone else's work: an interactive assistant that likes the small model, on a
+slot a batch coder keeps busy for an hour at a time.
+
+A `ModelRouter` rule can express that preference. List the members in
+preference order and set `route.poolActivation: IfIdle`:
+
+```yaml
+rules:
+  - name: assistant
+    match:
+      models: ["assistant"]
+    route:
+      backends: ["coder-small", "coder-large"]
+      poolActivation: IfIdle
+```
+
+Under `IfIdle` the proxy only starts a swap when the incumbent is idle. If
+`coder-small` is not resident and `coder-large` has requests in flight, the
+proxy skips `coder-small` at once and dispatches to `coder-large`, the member
+that is already warm. Nothing is held and no swap is queued. When the slot is
+idle the rule behaves exactly like the default (`Wait`): the swap runs under
+`swapBudget` and the request is served by `coder-small` afterwards. A swap that
+is already in flight is waited on in both modes, because the incumbent is
+unloading and cannot serve anyway.
+
+"Busy" means requests the proxy itself is tracking. Traffic that reaches a
+member's Service directly, bypassing the router, is invisible to this check
+(the controller's `/slots` drain still protects it at swap time). Route all
+pool traffic through the router if you rely on `IfIdle`. Skips are counted in
+`llmkube_modelpool_busy_skips_total{router,pool,member}`.
+
 ### swapBudget, and why it is separate from the request timeout
 
 `swapBudget` (default `300s`) bounds how long the router holds a cross-model
