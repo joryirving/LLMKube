@@ -1,0 +1,63 @@
+# Foreman Anthropic-native reviewer Agent (#1627).
+#
+# Dials an Anthropic-native /v1/messages endpoint directly instead of
+# an OpenAI-compatible translation proxy. Reach for this when the
+# translation is where fidelity is lost: the Messages wire carries the
+# model's reasoning as a first-class thinking channel and tool input
+# as structured JSON, both of which an OpenAI-shim degrades or drops
+# (e.g. reasoning leaking back into conversation content).
+#
+# Endpoint forms:
+#   - api.anthropic.com:            https://api.anthropic.com/v1
+#   - MiniMax Anthropic surface:    https://api.minimax.io/anthropic/v1
+#   - any Messages-compatible server (LiteLLM /v1/anthropic passthrough,
+#     a local proxy): supply its version prefix.
+# The client appends /messages; supply the /v1 prefix.
+#
+# Sovereignty
+# -----------
+# Anthropic Agents are non-local: the same TWO gates as cloud-proxy
+# apply — the operator --allow-cloud-providers kill switch (chart value
+# foreman.allowCloudProviders) and the per-Workload
+# spec.allowCloudReviewers opt-in. Either one closed suppresses this
+# Agent's tasks with a CloudReviewersSuppressed condition.
+#
+# The API key Secret
+# ------------------
+# Create the referenced Secret in the same namespace as the Workload:
+#
+#   kubectl create secret generic anthropic-api-key \
+#     --from-literal=api-key="<your Anthropic API key>" \
+#     -n default
+#
+# Unlike cloud-proxy (Authorization: Bearer), the value is sent
+# verbatim as the x-api-key header, the Messages API contract.
+apiVersion: foreman.llmkube.dev/v1alpha1
+kind: Agent
+metadata:
+    name: claude-native-anthropic-reviewer
+    namespace: default
+    labels:
+        app.kubernetes.io/part-of: foreman
+        foreman.llmkube.dev/role: reviewer
+        foreman.llmkube.dev/provider: anthropic
+spec:
+    role: reviewer
+    provider: anthropic
+    providerConfig:
+        # Anthropic-native Messages endpoint; must include the /v1
+        # prefix; the client appends /messages.
+        baseURL: https://api.anthropic.com/v1
+        # Model identifier as the Messages API expects it (no proxy
+        # routing layer in front this time).
+        model: claude-sonnet-4-6
+        apiKeySecretRef:
+            name: anthropic-api-key
+            key: api-key
+    systemPrompt: |
+        You are a code reviewer. Read the fetched diff, ground every
+        finding in a file and line, and submit your verdict with
+        submit_result.
+    tools:
+        - fetch_issue
+        - submit_result
