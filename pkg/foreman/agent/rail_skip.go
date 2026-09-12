@@ -26,8 +26,17 @@ const railsSkippedKey = "railsSkipped"
 // controller, which reads verdictDemotedBy back out of the result envelope
 // and cannot import this package, compares against the same strings (#1636).
 const (
-	railIssueAsk            = reviewer.RailIssueAsk
-	railScopeOverlap        = reviewer.RailScopeOverlap
+	railIssueAsk     = reviewer.RailIssueAsk
+	railScopeOverlap = reviewer.RailScopeOverlap
+	// railUnverifiedSummary aliases the shared rail name so the rail's
+	// verdictDemotedBy marker and the controller's inertDemotion predicate
+	// compile against the same string (#1454, #1636). The rail rewrites a
+	// GO to NO-GO when the reviewer's own terminal summary states in plain
+	// language that verification could not be performed. Like the issueAsk
+	// rail's demotion, this is a statement about verification confidence,
+	// not about the change: re-running the coder cannot make an unverifiable
+	// environment verifiable.
+	railUnverifiedSummary   = reviewer.RailUnverifiedSummary
 	railVerdictFromFindings = "verdict-from-findings"
 	railEmptyClaim          = "empty-claim"
 	railGroundedFinding     = "grounded-finding"
@@ -36,13 +45,6 @@ const (
 	// could not be fetched at all; it never rewrites the verdict. Demotion is
 	// a later flip once the fleet shows the runs fit the turn budget.
 	railExecution = "review-execution"
-	// railUnverifiedSummary names the unverified-summary rail (#1454). It
-	// rewrites a GO to NO-GO when the reviewer's own terminal summary states
-	// in plain language that verification could not be performed. Like the
-	// issueAsk rail's demotion, this is a statement about verification
-	// confidence, not about the change: re-running the coder cannot make an
-	// unverifiable environment verifiable.
-	railUnverifiedSummary = "unverified-summary"
 )
 
 // Reasons a rail could not run.

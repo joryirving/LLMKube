@@ -1715,7 +1715,8 @@ func TestEnforceReviewerIssueAsk_UnverifiedGoNoRefsNoVouchDemotes(t *testing.T) 
 // terminal summary states in plain language that verification could not be
 // performed must demote to NO-GO, and a normal GO must stand untouched. The
 // first row is verbatim from the windowstead#321 incident that motivated
-// the rail.
+// the rail; the variant rows pin the full phrase set the enforcer's
+// docstring promises, including both apostrophe forms of the contractions.
 func TestEnforceReviewerUnverifiedSummary(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1742,6 +1743,42 @@ func TestEnforceReviewerUnverifiedSummary(t *testing.T) {
 			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
 		},
 		{
+			name:    "contraction can't, straight apostrophe",
+			summary: "Reviewed statically; can't verify the migration path without a database.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
+			name:    "contraction can't, curly apostrophe",
+			summary: "Reviewed statically; can’t verify the migration path without a database.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
+			name:    "contraction couldn't, straight apostrophe",
+			summary: "The harness is missing, so we couldn't verify the fix in this environment.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
+			name:    "contraction couldn't, curly apostrophe",
+			summary: "The harness is missing, so we couldn’t verify the fix in this environment.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
+			name:    "spaced can not",
+			summary: "No runtime is available here, so I can not verify the behavior.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
+			name:    "was not able to",
+			summary: "I was not able to verify the fix before approving; the harness was unavailable.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
+		},
+		{
 			name:    "case-insensitive",
 			summary: "APPROVE. Could NOT VERIFY the migration path; no database available.",
 			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
@@ -1764,6 +1801,18 @@ func TestEnforceReviewerUnverifiedSummary(t *testing.T) {
 			summary: "The new guard verifies the token before use; tests confirm it rejects expired tokens.",
 			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
 			want:    foremanv1alpha1.AgenticTaskVerdictGo,
+		},
+		{
+			// The tradeoff the enforcer's docstring documents: phrase
+			// anchoring matches whatever subject the phrase carries, so an
+			// honest GO describing what a third party cannot do is
+			// demoted. The false positive is accepted, because the
+			// subjectless incident summaries this rail exists for (#1454)
+			// are the common case.
+			name:    "object-subject honest GO is the accepted false positive",
+			summary: "The new signature check is correct: a client without the key cannot verify a forged signature, and the tests prove it.",
+			verdict: foremanv1alpha1.AgenticTaskVerdictGo,
+			want:    foremanv1alpha1.AgenticTaskVerdictNoGo,
 		},
 		{
 			name:    "non-GO with the phrase passes through unmarked",
