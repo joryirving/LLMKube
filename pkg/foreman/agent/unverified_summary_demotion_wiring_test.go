@@ -17,6 +17,7 @@ limitations under the License.
 package agent_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -52,9 +53,13 @@ import (
 // promote. The unverified-summary rail is the only actor. The summary is the
 // windowstead#321 incident that motivated the rail.
 
+const submitGOUnverifiedSummaryArgs = `{"verdict":"GO","summary":"APPROVE. The verify job is disabled in this fleet, ` +
+	`so I cannot verify goal reward or progression logic.",` +
+	`"issueAsk":"The verify Job is disabled in this fleet"}`
+
 // submitGOUnverifiedSummary mirrors a reviewer approval whose summary admits
 // verification could not be performed.
-const submitGOUnverifiedSummary = `{
+var submitGOUnverifiedSummary = fmt.Sprintf(`{
   "id": "t-submit",
   "choices": [{
     "index": 0,
@@ -65,13 +70,14 @@ const submitGOUnverifiedSummary = `{
         "type": "function",
         "function": {
           "name": "submit_result",
-          "arguments": "{\"verdict\":\"GO\",\"summary\":\"APPROVE. The verify job is disabled in this fleet, so I cannot verify goal reward or progression logic.\",\"issueAsk\":\"The verify Job is disabled in this fleet\"}"
+          "arguments": %q
         }
       }]
     },
     "finish_reason": "tool_calls"
   }]
-}`
+}`,
+	submitGOUnverifiedSummaryArgs)
 
 func TestUnverifiedSummaryRail_WiredIntoRunLLMPath(t *testing.T) {
 	gitOrSkip(t)
@@ -85,7 +91,8 @@ func TestUnverifiedSummaryRail_WiredIntoRunLLMPath(t *testing.T) {
 		"fetch_issue": {
 			// No path refs, so the scope-overlap rail skips instead of
 			// demoting.
-			Output: map[string]any{"body": "## Bug\n\nThe verify Job is disabled in this fleet, so runtime checks cannot run here."},
+			Output: map[string]any{"body": "## Bug\n\nThe verify Job is disabled " +
+				"in this fleet, so runtime checks cannot run here."},
 		},
 		"submit_result": {
 			Terminal: true,
