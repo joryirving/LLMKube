@@ -33,8 +33,13 @@ import (
 // catches the Invalid error and takes the defensive fallback, so the intended
 // verdict/reason is lost. RebaseConflictUnresolved regressed exactly this way
 // (#1840): the constant existed but the kubebuilder enum marker omitted it, so
-// the generated CRD did not carry it. This pins the whole set against the live
-// CRD so a new reason cannot ship without its enum entry.
+// the generated CRD did not carry it.
+//
+// allReasons is maintained by hand: it pins the reasons listed below against
+// the live CRD, not literally every declared const. A brand-new reason still
+// has to be added both to the enum marker AND to this slice -- the guard does
+// not discover reasons on its own. What it does guarantee is that every reason
+// listed here is a member of the generated CRD enum.
 var _ = Describe("AgenticTask failureReason enum", func() {
 	allReasons := []foremanv1alpha1.AgenticTaskFailureReason{
 		foremanv1alpha1.FailureAgentNotFound,
